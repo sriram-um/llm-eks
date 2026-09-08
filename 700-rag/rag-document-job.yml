@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rag-document-processor
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      serviceAccountName: s3-access-sa
+      containers:
+      - name: document-processor
+        image: python:3.11-slim
+        command:
+        - bash
+        - -c
+        - |
+          apt-get update && \
+          apt-get install -y --no-install-recommends curl python3-dev build-essential && \
+          pip install --no-cache-dir boto3==1.43.43 && \
+          pip install --no-cache-dir torch==2.13.0+cpu --index-url https://download.pytorch.org/whl/cpu && \
+          pip install --no-cache-dir sentence-transformers==5.6.0 && \
+          python /app/rag-processor.py
+        env:
+        - name: S3_VECTOR_BUCKET_NAME
+          value: "${S3_VECTOR_BUCKET_NAME}"
+        - name: S3_VECTOR_INDEX_NAME
+          value: "${S3_VECTOR_INDEX_NAME}"
+        - name: S3_BUCKET_NAME
+          value: "${S3_BUCKET_NAME}"
+        - name: AWS_REGION
+          value: "${AWS_REGION}"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        volumeMounts:
+        - name: processor-script
+          mountPath: /app/rag-processor.py
+          subPath: rag-processor.py
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+      restartPolicy: Never
+      volumes:
+      - name: processor-script
+        configMap:
+          name: rag-processor-script

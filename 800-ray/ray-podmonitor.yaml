@@ -1,0 +1,58 @@
+# Scrapes Ray's own metrics from the head and worker pods.
+# Ray's published PodMonitor: https://docs.ray.io/en/latest/cluster/kubernetes/k8s-ecosystem/prometheus-grafana.html
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    release: kube-prometheus-stack # Required for Prometheus operator discovery
+  name: ray-head-monitor
+  namespace: monitoring
+spec:
+  jobLabel: ray-head
+  namespaceSelector:
+    matchNames:
+      - default
+  selector:
+    matchLabels:
+      ray.io/node-type: head
+  podMetricsEndpoints:
+    - port: metrics
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_label_ray_io_cluster
+          targetLabel: ray_io_cluster
+    - port: as-metrics # autoscaler metrics
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_label_ray_io_cluster
+          targetLabel: ray_io_cluster
+    - port: dash-metrics # dashboard metrics
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_label_ray_io_cluster
+          targetLabel: ray_io_cluster
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: ray-workers-monitor
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack # Required for Prometheus operator discovery
+spec:
+  jobLabel: ray-workers
+  namespaceSelector:
+    matchNames:
+      - default
+  selector:
+    matchLabels:
+      ray.io/node-type: worker
+  podMetricsEndpoints:
+    - port: metrics
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_ray_io_cluster]
+          targetLabel: ray_io_cluster

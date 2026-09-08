@@ -1,0 +1,186 @@
+apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: vllm
+  namespace: default
+spec:
+  serveConfigV2: |
+    applications:
+      - name: mistral
+        import_path: ray.serve.llm:build_openai_app
+        route_prefix: "/"
+        args:
+          llm_configs:
+            - model_loading_config:
+                model_id: ministral
+                model_source: s3://${S3_BUCKET_NAME}/Ministral-3-8B-Instruct-2512/
+              engine_kwargs:
+                dtype: bfloat16
+                max_model_len: 8192
+                gpu_memory_utilization: 0.9
+                trust_remote_code: true
+                enable_chunked_prefill: true
+                max_num_seqs: 4
+              deployment_config:
+                autoscaling_config:
+                  min_replicas: 1
+                  max_replicas: 1
+                  target_ongoing_requests: 2
+                max_ongoing_requests: 5
+  rayClusterConfig:
+    rayVersion: '2.56.1'
+    headGroupSpec:
+      headService:
+        metadata:
+          name: vllm
+      rayStartParams: {}
+      template:
+        spec:
+          enableServiceLinks: false
+          serviceAccountName: model-storage-sa
+          containers:
+          - name: ray-head
+            image: public.ecr.aws/deep-learning-containers/ray:serve-ml-cuda-v1.3
+            command: ["/bin/bash", "-c"]
+            args:
+            - |
+              python3 -m pip install -q 'ray[llm]==2.56.1' 'vllm==0.22.0'
+              ray start --head --dashboard-host=0.0.0.0 --dashboard-port=8265 --num-cpus=1 --num-gpus=0 --metrics-export-port=8080 --block --dashboard-agent-listen-port=52365 --no-monitor
+            lifecycle:
+              preStop:
+                exec:
+                  command: ["/bin/sh", "-c", "ray stop"]
+            ports:
+            - containerPort: 6379
+              name: gcs
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 8000
+              name: serve
+            - containerPort: 52365
+              name: dashboard-agent
+            - containerPort: 8080
+              name: metrics
+            - containerPort: 44217
+              name: as-metrics
+            - containerPort: 44227
+              name: dash-metrics
+            volumeMounts:
+            - mountPath: /tmp/ray
+              name: ray-logs
+            resources:
+              limits:
+                cpu: 1
+                memory: 6Gi
+              requests:
+                cpu: 500m
+                memory: 4Gi
+            env:
+            - name: RAY_SERVE_HTTP_HOST
+              value: "0.0.0.0"
+            livenessProbe:
+              exec:
+                command:
+                - bash
+                - -c
+                - curl -sf http://localhost:52365/api/local_raylet_healthz | grep -q success && curl -sf http://localhost:8265/api/gcs_healthz | grep -q success
+              initialDelaySeconds: 30
+              periodSeconds: 5
+              timeoutSeconds: 3
+              failureThreshold: 120
+            readinessProbe:
+              exec:
+                command:
+                - bash
+                - -c
+                - ray health-check --address 127.0.0.1:6379 > /dev/null 2>&1
+              initialDelaySeconds: 10
+              periodSeconds: 5
+              timeoutSeconds: 3
+              failureThreshold: 120
+          nodeSelector:
+            karpenter.sh/nodepool: gpu
+          tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+          volumes:
+          - name: ray-logs
+            emptyDir: {}
+    workerGroupSpecs:
+    - replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      groupName: gpu-group
+      rayStartParams: {}
+      template:
+        spec:
+          enableServiceLinks: false
+          serviceAccountName: model-storage-sa
+          containers:
+          - name: ray-worker
+            image: public.ecr.aws/deep-learning-containers/ray:serve-ml-cuda-v1.3
+            command: ["/bin/bash", "-c"]
+            args:
+            - |
+              dnf install -y -q gcc gcc-c++ make which
+              python3 -m pip install -q 'ray[llm]==2.56.1' 'vllm==0.22.0'
+              ray start --address=${RAY_ADDRESS:-${FQ_RAY_IP}:6379} --metrics-export-port=8080 --block --num-cpus=2 --num-gpus=1 --no-monitor
+            lifecycle:
+              preStop:
+                exec:
+                  command: ["/bin/sh", "-c", "ray stop"]
+            volumeMounts:
+            - mountPath: /tmp/ray
+              name: ray-logs
+            - name: shm
+              mountPath: /dev/shm
+            resources:
+              limits:
+                cpu: 3
+                memory: 22Gi
+                nvidia.com/gpu: 1
+              requests:
+                cpu: 2
+                memory: 20Gi
+                nvidia.com/gpu: 1
+            env:
+            - name: CC
+              value: "/usr/bin/gcc"
+            - name: VLLM_USE_FLASHINFER_SAMPLER
+              value: "0"
+            livenessProbe:
+              exec:
+                command:
+                - bash
+                - -c
+                - ray status > /dev/null 2>&1
+              initialDelaySeconds: 30
+              periodSeconds: 5
+              timeoutSeconds: 3
+              failureThreshold: 120
+            readinessProbe:
+              exec:
+                command:
+                - bash
+                - -c
+                - ray status > /dev/null 2>&1
+              initialDelaySeconds: 10
+              periodSeconds: 5
+              timeoutSeconds: 3
+              failureThreshold: 10
+          nodeSelector:
+            karpenter.sh/nodepool: gpu
+          tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+          volumes:
+          - name: ray-logs
+            emptyDir: {}
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 10Gi

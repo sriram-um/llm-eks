@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: strands-weather-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: strands-weather-agent
+  template:
+    metadata:
+      labels:
+        app: strands-weather-agent
+    spec:
+      containers:
+      - name: strands-weather-agent
+        image: $ECR_REPO:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: MODEL_ENDPOINT
+          value: "http://vllm-serve-svc:8000/v1"
+        - name: MODEL_ID
+          value: "ministral"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: strands-weather-agent
+spec:
+  selector:
+    app: strands-weather-agent
+  ports:
+  - port: 80
+    targetPort: 8000
+  type: ClusterIP

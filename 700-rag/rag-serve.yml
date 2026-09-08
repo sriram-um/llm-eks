@@ -1,0 +1,185 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: rag-serve-script
+data:
+    rag_serve.py: |
+        import os
+        import time
+        import asyncio
+        import boto3
+        import aiohttp
+        import uvicorn
+        from contextlib import asynccontextmanager
+        from fastapi import FastAPI, Request
+        from fastapi.responses import JSONResponse
+        from sentence_transformers import SentenceTransformer
+  
+        # Configuration parameters
+        ACCOUNT_ID = os.environ.get("ACCOUNT_ID")
+        S3_VECTOR_BUCKET_NAME = os.environ.get("S3_VECTOR_BUCKET_NAME")
+        S3_VECTOR_INDEX_NAME = os.environ.get("S3_VECTOR_INDEX_NAME", "knowledge-base")
+        MODEL_ID = os.environ.get("MODEL_ID", "ministral")
+        MODEL_ENDPOINT = os.environ.get("MODEL_ENDPOINT", "http://vllm-serve-svc:8000/v1/chat/completions")
+        AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
+        RAG_PROMPT_TEMPLATE = """
+        You are an AI assistant designed to help users with questions. You have been provided with relevant context extracted from documents.
+
+        Context information:
+        {context}
+
+        Based on the above context, please answer the following question in detail:
+        {query}
+
+        If the context doesn't contain information to answer the question directly, please say so and provide a general response.
+        """
+
+        # ---------------------------------------------------------------------------
+        # Application state (replaces Ray actor state)
+        # ---------------------------------------------------------------------------
+        class AppState:
+            embed_model: SentenceTransformer = None
+            s3vectors_client = None
+            http_session: aiohttp.ClientSession = None
+
+        state = AppState()
+
+        # ---------------------------------------------------------------------------
+        # Lifespan: initialise / teardown resources (replaces __init__ / shutdown)
+        # ---------------------------------------------------------------------------
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            # Startup
+            boto3.setup_default_session(region_name=AWS_REGION)
+
+            print("Initializing the embedding model...")
+            state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+            print("Connecting to S3 Vectors...")
+            state.s3vectors_client = boto3.client("s3vectors", region_name=AWS_REGION)
+
+            state.http_session = aiohttp.ClientSession()
+            print("S3 Vectors RAG Service initialization complete!")
+
+            yield
+
+            # Shutdown
+            if state.http_session:
+                await state.http_session.close()
+
+        app = FastAPI(lifespan=lifespan)
+
+        # ---------------------------------------------------------------------------
+        # Helper functions (previously instance methods)
+        # ---------------------------------------------------------------------------
+        async def retrieve_context(query: str, top_k: int = 3) -> str:
+            """Retrieve relevant context from S3 Vectors."""
+            try:
+                query_embedding = state.embed_model.encode(query)
+
+                search_result = state.s3vectors_client.query_vectors(
+                    vectorBucketName=S3_VECTOR_BUCKET_NAME,
+                    indexName=S3_VECTOR_INDEX_NAME,
+                    queryVector={"float32": query_embedding.tolist()},
+                    topK=top_k,
+                    returnMetadata=True,
+                    returnDistance=True,
+                )
+
+                contexts = []
+                for vector in search_result.get("vectors", []):
+                    metadata = vector.get("metadata", {})
+                    distance = vector.get("distance", 1.0)
+                    similarity = 1 - distance
+                    context_text = (
+                        f"[Source: {metadata.get('source', 'unknown')} - "
+                        f"Product: {metadata.get('product', 'N/A')} - "
+                        f"Similarity: {similarity:.3f}]"
+                    )
+                    context_text += f"{metadata.get('text', '')}"
+                    contexts.append(context_text)
+
+                return "".join(contexts)
+            except Exception as e:
+                print(f"Error retrieving context from S3 Vectors: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                return "No relevant context found due to an error."
+
+
+        def _create_chat_request(content: str) -> dict:
+            """Create a chat request payload for the LLM service."""
+            return {
+                "model": MODEL_ID,
+                "messages": [{"role": "user", "content": content}],
+                "temperature": 0.7,
+                "max_tokens": 256,
+            }
+
+        # ---------------------------------------------------------------------------
+        # Route handler (replaces Ray Serve __call__)
+        # ---------------------------------------------------------------------------
+        @app.post("/query")
+        async def handle_query(request: Request):
+            """Process incoming requests with optional S3 Vectors RAG retrieval."""
+            start_time = time.time()
+
+            # Parse request body
+            try:
+                req_data = await request.json()
+            except Exception as e:
+                return JSONResponse({"error": f"Request processing error: {str(e)}"}, status_code=400)
+
+            if not isinstance(req_data, dict):
+                return JSONResponse({"error": "Invalid request format"}, status_code=400)
+
+            # Extract query
+            query = req_data.get("query", "") or req_data.get("prompt", "")
+            if not query:
+                messages = req_data.get("messages", [])
+                query = next(
+                    (msg["content"] for msg in reversed(messages) if msg.get("role") == "user"),
+                    None,
+                )
+
+            if not query:
+                return JSONResponse({"error": "No query provided"}, status_code=400)
+
+            use_rag = req_data.get("use_rag", True)
+
+            # Build prompt
+            if use_rag:
+                context = await retrieve_context(query)
+                rag_prompt = RAG_PROMPT_TEMPLATE.format(context=context, query=query)
+                chat_request = _create_chat_request(rag_prompt)
+            else:
+                context = None
+                chat_request = _create_chat_request(query)
+
+            # Call the LLM (vLLM endpoint)
+            async with state.http_session.post(MODEL_ENDPOINT, json=chat_request) as resp:
+                result = await resp.json()
+                generated_text = result["choices"][0]["message"]["content"]
+
+            response_payload = {
+                "generated_text": generated_text,
+                "query": query,
+                "rag_enabled": use_rag,
+                "vector_store": "S3 Vectors" if use_rag else "None",
+                "processing_time": time.time() - start_time,
+            }
+            if use_rag:
+                response_payload["context_used"] = context
+
+            return response_payload
+
+        # ---------------------------------------------------------------------------
+        # Entrypoint
+        # ---------------------------------------------------------------------------
+        if __name__ == "__main__":
+            uvicorn.run(
+                "rag_serve:app",
+                host="0.0.0.0",
+                port=8080,
+                workers=1,
+            )

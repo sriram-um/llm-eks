@@ -1,0 +1,38 @@
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: kube-prometheus-stack
+  interval: 30s
+  honorLabels: true
+
+service:
+  enable: true
+  type: ClusterIP
+  port: 9400
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9400"
+
+nodeSelector:
+  karpenter.sh/nodepool: gpu
+
+tolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+# Pod annotations for Prometheus scraping
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9400"
+
+podLabels:
+  app.kubernetes.io/name: "dcgm-exporter"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi

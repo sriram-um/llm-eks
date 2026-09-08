@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-service
+  labels:
+    app: rag-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rag-service
+  template:
+    metadata:
+      labels:
+        app: rag-service
+    spec:
+      # Terraform associates this service account with the RAG IAM role through EKS Pod Identity.
+      serviceAccountName: s3-access-sa
+      containers:
+        - name: rag-service
+          image: python:3.11-slim
+          command: ["/bin/sh"]
+          args:
+          - -c
+          - |
+            pip install boto3==1.43.44 aiohttp==3.14.1 uvicorn==0.51.0 fastapi==0.139.0 sentence_transformers==5.6.0 && python /app/rag_serve.py
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 60
+          env:
+            - name: ACCOUNT_ID
+              value: "${ACCOUNT_ID}"
+            - name: S3_VECTOR_BUCKET_NAME
+              value: "${S3_VECTOR_BUCKET_NAME}"
+            - name: S3_VECTOR_INDEX_NAME
+              value: "${S3_VECTOR_INDEX_NAME}"
+            - name: MODEL_ID
+              value: "${MODEL_ID}"
+            - name: MODEL_ENDPOINT
+              value: "${MODEL_ENDPOINT}"
+            - name: AWS_REGION
+              value: "${AWS_REGION}"
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: rag-script
+              mountPath: /app
+      volumes:
+        - name: rag-script
+          configMap:
+            name: rag-serve-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-service
+spec:
+  selector:
+    app: rag-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
