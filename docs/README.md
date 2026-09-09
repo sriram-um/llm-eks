@@ -5,9 +5,7 @@ fine-tuning and extending an open-weights LLM on **Amazon EKS Auto Mode** with *
 L40S GPUs**.
 
 Every command, manifest, and number in this tutorial comes from one real ~5-hour run on a
-live cluster, transcribed from a 4,491-line terminal log with account-specific values replaced
-by the placeholders described under [Conventions](#conventions). The dashboard captures in
-[`screenshots/`](screenshots/) are from that same run.
+live cluster. The dashboard captures in [`screenshots/`](screenshots/) are from that same run.
 
 Code: **https://github.com/sriram-um/llm-eks**
 
